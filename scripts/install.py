@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""Install SA globally without replacing an existing skill or manual edits."""
+"""Install SA for Claude Code or Codex without replacing an existing skill or manual edits."""
 
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import sys
 
 
 MARKER = '.sa-install.json'
+NAME = 'sa'
+# Codex UI metadata lives in agents/; Claude Code ignores it, so it is not installed there.
+PLATFORMS = {
+    'claude': {'skills_dir': Path.home() / '.claude' / 'skills',
+               'folders': ('references', 'scripts')},
+    'codex': {'skills_dir': Path.home() / '.agents' / 'skills',
+              'folders': ('agents', 'references', 'scripts')},
+}
 
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def package_files(source):
+def package_files(source, folders):
     files = [source / 'SKILL.md']
-    for folder in ('agents', 'references', 'scripts'):
+    for folder in folders:
         directory = source / folder
         if directory.exists():
             files.extend(path for path in directory.rglob('*')
@@ -31,25 +40,53 @@ def package_files(source):
     return result
 
 
-def install(source, skills_dir, update=False):
+def installed_directory(skills_dir):
+    """Return the existing installation, including a legacy `SA` spelling."""
+    if not skills_dir.is_dir():
+        return None
+    matches = [path for path in skills_dir.iterdir() if path.name.lower() == NAME]
+    if len(matches) > 1:
+        raise ValueError('Several SA installations differ only by letter case; migrate manually')
+    return matches[0] if matches else None
+
+
+def rename_to_canonical(current, target):
+    # Two steps, so a case-only rename also works on case-insensitive file systems.
+    temporary = current.with_name(f'.{NAME}-rename-{os.getpid()}')
+    current.rename(temporary)
+    try:
+        temporary.rename(target)
+    except OSError:
+        temporary.rename(current)
+        raise
+
+
+def install(source, skills_dir, platform, update=False):
+    if platform not in PLATFORMS:
+        raise ValueError(f'Unknown platform: {platform}')
     source = Path(source).resolve()
     skills_dir = Path(skills_dir).resolve()
-    target = skills_dir / 'SA'
-    if target.is_symlink() or (hasattr(target, 'is_junction') and target.is_junction()):
+    target = skills_dir / NAME
+    current = installed_directory(skills_dir)
+    if current is not None and (current.is_symlink()
+                                or (hasattr(current, 'is_junction') and current.is_junction())):
         raise ValueError('Refusing to install over a linked skill directory')
     if target.is_relative_to(source) or source.is_relative_to(target):
         raise ValueError('Source and installed skill must not overlap')
-    content = package_files(source)
+    content = package_files(source, PLATFORMS[platform]['folders'])
     old_files = {}
-    if target.exists():
+    if current is not None:
         if not update:
             raise ValueError('SA already exists; use --update for an unmodified managed installation')
-        marker = target / MARKER
+        marker = current / MARKER
         if not marker.is_file() or marker.is_symlink():
             raise ValueError('Existing SA is not a managed installation; preserve it manually')
         manifest = json.loads(marker.read_text(encoding='utf-8'))
         if manifest.get('package') != 'SA' or manifest.get('schema') != 1:
             raise ValueError('Unknown installation manifest')
+        # Installations made before platforms existed were Codex-only.
+        if manifest.get('platform', 'codex') != platform:
+            raise ValueError('Existing SA was installed for another platform; no files changed')
         old_files = manifest.get('files')
         if not isinstance(old_files, dict):
             raise ValueError('Invalid installation manifest')
@@ -58,16 +95,16 @@ def install(source, skills_dir, update=False):
             if (relative.is_absolute() or '..' in relative.parts
                     or '\\' in name or ':' in name or name == MARKER):
                 raise ValueError('Unsafe path in installation manifest')
-            path = target / name
-            if (not path.resolve().is_relative_to(target) or not path.is_file()
+            path = current / name
+            if (not path.resolve().is_relative_to(current.resolve()) or not path.is_file()
                     or path.is_symlink() or sha(path.read_bytes()) != expected):
                 raise ValueError('Installed files were edited or removed; no files changed')
         existing = set()
-        for path in target.rglob('*'):
+        for path in current.rglob('*'):
             if path.is_symlink() or (hasattr(path, 'is_junction') and path.is_junction()):
                 raise ValueError('Linked installed files are not safe to update')
             if path.is_file():
-                name = path.relative_to(target).as_posix()
+                name = path.relative_to(current).as_posix()
                 if '__pycache__' in path.parts and path.suffix == '.pyc':
                     continue
                 existing.add(name)
@@ -75,15 +112,18 @@ def install(source, skills_dir, update=False):
             raise ValueError('Installation contains untracked files; no files changed')
     # Reject predictable layout conflicts before replacing even the first file.
     # File/directory conversions need a deliberate migration, not a partial update.
-    for name in content:
-        destination = target / name
-        if destination.exists() and not destination.is_file():
-            raise ValueError('Package file conflicts with an installed directory; no files changed')
-        for parent in destination.parents:
-            if parent == target:
-                break
-            if parent.exists() and not parent.is_dir():
-                raise ValueError('Package directory conflicts with an installed file; no files changed')
+    if current is not None:
+        for name in content:
+            destination = current / name
+            if destination.exists() and not destination.is_file():
+                raise ValueError('Package file conflicts with an installed directory; no files changed')
+            for parent in destination.parents:
+                if parent == current:
+                    break
+                if parent.exists() and not parent.is_dir():
+                    raise ValueError('Package directory conflicts with an installed file; no files changed')
+        if current.name != NAME:
+            rename_to_canonical(current, target)
     target.mkdir(parents=True, exist_ok=True)
     for name, data in content.items():
         path = target / name
@@ -94,7 +134,7 @@ def install(source, skills_dir, update=False):
         if not path.resolve().is_relative_to(target):
             raise ValueError('Removed package file outside installation root')
         path.unlink()
-    manifest = {'package': 'SA', 'schema': 1,
+    manifest = {'package': 'SA', 'schema': 1, 'platform': platform,
                 'files': {name: sha(data) for name, data in sorted(content.items())}}
     (target / MARKER).write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     return target
@@ -102,15 +142,18 @@ def install(source, skills_dir, update=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--skills-dir', type=Path, default=Path.home() / '.agents' / 'skills')
+    parser.add_argument('--platform', choices=sorted(PLATFORMS), required=True)
+    parser.add_argument('--skills-dir', type=Path,
+                        help='default: ~/.claude/skills (claude) or ~/.agents/skills (codex)')
     parser.add_argument('--update', action='store_true')
     args = parser.parse_args()
+    skills_dir = args.skills_dir or PLATFORMS[args.platform]['skills_dir']
     try:
-        target = install(Path(__file__).resolve().parents[1], args.skills_dir, args.update)
+        target = install(Path(__file__).resolve().parents[1], skills_dir, args.platform, args.update)
     except (OSError, ValueError) as error:
         print(f'Install failed: {error}', file=sys.stderr)
         return 1
-    print(f'Installed SA: {target}')
+    print(f'Installed SA for {args.platform}: {target}')
     return 0
 
 

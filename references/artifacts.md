@@ -63,11 +63,11 @@ ID стабилен между запусками, пригоден для им�
 
 Внешние политики, настройки провайдера/БД/gateway, feature flags и зависимости, не отраженные в коде/lockfile, учитывай как отдельные контекстные условия. Не читай настоящие секреты ради сравнения. Если такие условия важны и их неизменность не доказана, нельзя переиспользовать результат. Сначала актуализируй closure по текущему графу вызовов, потом вычисляй hash; не просто повторяй старый список файлов.
 
-Для детерминированного снимка используй стандартный Python 3.10+:
+Для детерминированного снимка используй стандартный Python 3.9+; `<python>` — команда из адаптера среды (`python3` или `python`):
 
 ```text
-python <skill>/scripts/fingerprint.py --root <project> --files routes/orders.py middleware/auth.py services/orders.py package-lock.json
-python <skill>/scripts/fingerprint.py --root <project> --files-from "Security Audit/dependencies/<id>.json"
+<python> <skill>/scripts/fingerprint.py --root <project> --files routes/orders.py middleware/auth.py services/orders.py package-lock.json
+<python> <skill>/scripts/fingerprint.py --root <project> --files-from "Security Audit/dependencies/<id>.json"
 ```
 
 `--files-from` — JSON-массив путей от корня. Скрипт читает только явно перечисленные файлы и выводит JSON `{schema, algorithm, digest, files:[{path, sha256}]}`. Сохрани stdout в `Fingerprints/<id>.json` в UTF-8 средствами среды. Он учитывает bytes на диске и набор путей, отказывается от отсутствующих файлов, symlink, выхода из корня и распространенных файлов секретов. Он **не обнаруживает зависимости**, не доказывает полноту и не проверяет внешнее окружение. Не добавляй секреты с нестандартным именем. Несколько последовательных изменений дерева невозможно атомарно снимковать этим helper-ом; сравни снимок до аудита, после ревью и при финализации. При изменениях/сомнениях перезапусти обе фазы.
@@ -202,7 +202,8 @@ State — checkpoint координатора, не источник истин�
 | `schema`, `run_id`, `started_at`, `updated_at` | Версия 2, идентичность/время текущего запуска, связь с предыдущей историей. |
 | `mode`, `scope`, `status` | `audit` / `fix` / `full`, точная область/полномочия, общий `running` / `partial` / `complete`. Не статус goal. |
 | `active_seconds`, `last_report_active_seconds` | Накопленное активное время и отметка часовой сводки; не обнуляются при рестарте. |
-| `goal_owned`, `heartbeat_id` | Принадлежность goal и ID фактически разрешённого heartbeat либо `null`; сохранить имеющиеся goal ID/основания. |
+| `goal_owned`, `heartbeat_id` | Принадлежность goal и ID фактически созданного таймера/heartbeat среды (см. адаптер) либо `null`; сохранить имеющиеся goal ID/основания. |
+| `platform`, `skill_root`, `platform_context` | Среда координатора, абсолютный корень скилла для заданий ролей и повторного чтения после компакции, данные адаптера среды (конфигурация проекта, ограничения, worktree) в формате адаптера. |
 | `endpoints` | Прежние audit-записи: status, fingerprint, profile, review, agent_id, reason; lifecycle, версии и история. |
 | `source_registry` | Все исходные пути, work ID, lifecycle (`present` / `removed`), назначение, формат/encoding/BOM/newlines, handler/доказанные возможности, raw versions/локаторы, состояния чтения/записи, endpoint/issue mapping и blockers; внутренние пути контейнеров. |
 | `work_items` | По work ID: исходник, endpoint/issue IDs, исполнение/фаза, round/attempt/agent ID, input/plan versions, phase artifacts/snapshots, разрешённая запись/ownership, blockers, вердикт/история. |
